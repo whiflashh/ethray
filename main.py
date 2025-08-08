@@ -11,16 +11,15 @@ def main():
     tx_hash = input("tx hash : ")
 
     receipt = get_tx_receipt(tx_hash)
-    print(json.dumps(receipt, indent=2))
+    # print(json.dumps(receipt, indent=2))
 
     trace = get_debug_trace(tx_hash)
-    print(json.dumps(trace, indent=2))
+    # print(json.dumps(trace, indent=2))
 
     calls = parse_trace(trace)
+    print(json.dumps(calls, indent=2))
     # alerts = detect_vulnerabilities(calls)
     # send_alert(alerts)
-    print(calls)
-
 
 if __name__ == "__main__":
     main()
