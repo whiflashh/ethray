@@ -12,7 +12,10 @@ def rpc_call(method, params):
     }
     res = requests.post(RPC_URL, json=payload)
     res.raise_for_status()
-    return res.json()["result"]
+    data = res.json()
+    if "error" in data:
+        raise Exception(f"RPC Error: {data['error']}")
+    return data.get("result")
 
 
 def get_tx_receipt(tx_hash: str) -> dict:
@@ -27,5 +30,5 @@ def get_tx_receipt(tx_hash: str) -> dict:
 
 
 def get_debug_trace(tx_hash: str) -> dict:
-    trace_result = rpc_call("debug_traceTransaction", [tx_hash, {"tracer": "callTracer"}])
+    trace_result = rpc_call("debug_traceTransaction", [tx_hash, {"tracer":"callTracer","timeout":"30s","reexec":1000000}])
     return trace_result
