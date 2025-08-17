@@ -1,99 +1,97 @@
 #!/usr/bin/env python3
+
 import time
 from web3 import Web3
 
 RPC_URL = "http://localhost:8545"
 POOL_CONFIGURATOR = "0x80C4cdee95E52a8ad2C57eC3265Bea3A9c91669D"
-MIN_SUPPLY = 1e6
+MIN_SUPPLY = 1.0
 
-# 시그니처
-RESERVE_INIT_SIG = Web3.keccak(text="ReserveInitialized(address,address,address,address,address)").hex()
-RDU_SIG = Web3.keccak(text="ReserveDataUpdated(address,uint256,uint256,uint256,uint256,uint256)").hex()
+INIT_RESERVES_SELECTOR = "0x02fb45e6"
+RESERVE_INIT_TOPIC = Web3.keccak(
+    text="ReserveInitialized(address,address,address,address,address)"
+).hex()
 
-# ABI
 ATOKEN_ABI = [
-    {"inputs":[],"name":"totalSupply","outputs":[{"type":"uint256","name":""}],"stateMutability":"view","type":"function"},
-    {"inputs":[],"name":"symbol","outputs":[{"type":"string","name":""}],"stateMutability":"view","type":"function"},
-    {"inputs":[],"name":"decimals","outputs":[{"type":"uint8","name":""}],"stateMutability":"view","type":"function"},
+    {"inputs":[],"name":"totalSupply","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
+    {"inputs":[],"name":"symbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
+    {"inputs":[],"name":"decimals","outputs":[{"type":"uint8"}],"stateMutability":"view","type":"function"},
 ]
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
-markets = {}
-last_block = 0
+to_cs = Web3.to_checksum_address
+_seen = set()
 
-def decode_address(topic):
-    return Web3.to_checksum_address("0x" + topic.hex()[-40:])
+def _trace(txh_hex: str):
+    return w3.provider.make_request(
+        "debug_traceTransaction",
+        [txh_hex, {"tracer":"callTracer","timeout":"20s"}]
+    )["result"]
 
-def check_new_markets(from_block, to_block):
-    try:
-        logs = w3.eth.get_logs({
-            "address": POOL_CONFIGURATOR,
-            "fromBlock": from_block,
-            "toBlock": to_block,
-            "topics": ["0x" + RESERVE_INIT_SIG]
-        })
-        print(logs)
-        
-        for log in logs:
-            print(log)
-            asset = decode_address(log["topics"][1])
-            atoken = decode_address(log["topics"][2])
-            
-            contract = w3.eth.contract(address=atoken, abi=ATOKEN_ABI)
-            symbol = contract.functions.symbol().call()
-            decimals = contract.functions.decimals().call()
-            
-            markets[atoken] = {
-                "asset": asset,
-                "symbol": symbol,
-                "decimals": decimals,
-                "start_block": log["blockNumber"]
-            }
-            print(f"New market: {symbol} ({atoken})")
-    except Exception as e:
-        print(f"Error checking new markets: {e}")
+def _has_init_reserves(txh_hex: str) -> bool:
+    sel = INIT_RESERVES_SELECTOR.lower()
+    target = POOL_CONFIGURATOR.lower()
+    t = _trace(txh_hex)
+    stack = [t]
+    while stack:
+        n = stack.pop()
+        if str(n.get("to","")).lower() == target and str(n.get("input","")).lower().startswith(sel):
+            return True
+        for c in (n.get("calls") or n.get("children") or []):
+            stack.append(c)
+    return False
 
-def check_liquidity(block_num):
-    for atoken, market in list(markets.items()):
+def _topic_addr(t) -> str:
+    return to_cs("0x" + t.hex()[-40:])
+
+def _handle_tx(txh_hex: str):
+    rcpt = w3.eth.get_transaction_receipt(txh_hex)
+    for lg in rcpt["logs"]:
+        if not lg["topics"]: 
+            continue
+        if lg["topics"][0].hex().lower() != RESERVE_INIT_TOPIC.lower():
+            continue
+        asset  = _topic_addr(lg["topics"][1])
+        atoken = _topic_addr(lg["topics"][2])
+        print(f"[ReserveInitialized] asset={asset} aToken={atoken} block={lg['blockNumber']} tx={txh_hex}")
         try:
-            contract = w3.eth.contract(address=atoken, abi=ATOKEN_ABI)
-            total_supply = contract.functions.totalSupply().call(block_identifier=block_num)
-            supply_units = total_supply / (10 ** market["decimals"])
-            
-            if supply_units < MIN_SUPPLY:
-                print(f"LOW LIQUIDITY: {market['symbol']} supply={supply_units:.2f} < {MIN_SUPPLY}")
-                
+            c = w3.eth.contract(address=atoken, abi=ATOKEN_ABI)
+            dec = c.functions.decimals().call()
+            sym = c.functions.symbol().call()
+            ts  = c.functions.totalSupply().call(block_identifier=lg["blockNumber"])
+            su  = ts / (10 ** dec)
+            tag = "⚠️ 취약" if su < MIN_SUPPLY else "OK"
+            print(f"  -> {sym} totalSupply={su:.6f} ({tag})")
         except Exception as e:
-            print(f"Error checking {market['symbol']}: {e}")
+            print(f"  -> aToken 조회 실패 : {e}")
 
 def main():
-    global last_block
-    
-    current_block = w3.eth.block_number
-    last_block = current_block - 5
-        
-    print("Starting liquidity monitor...")
-    
+    print("[i] start")
     while True:
         try:
-            current_block = w3.eth.block_number
-            safe_block = current_block - 5
-
-            print(f"current block : {current_block}")
-            
-            if safe_block > last_block:
-                check_new_markets(last_block + 1, safe_block)
-                check_liquidity(safe_block)
-                last_block = safe_block
-                
+            head = w3.eth.block_number
+            print("current block :", head)
+            start = max(0, head - 5)
+            for b in range(start, head + 1):
+                blk = w3.eth.get_block(b, full_transactions=True)
+                for tx in blk.transactions or []:
+                    txh = tx["hash"].hex()
+                    if txh in _seen:
+                        continue
+                    _seen.add(txh)
+                    try:
+                        if _has_init_reserves(txh):
+                            print(f"[HIT] initReserves in tx {txh} (block {b})")
+                            _handle_tx(txh)
+                    except Exception as e:
+                        print(f"[trace err] {txh} : {e}")
             time.sleep(3)
-            
         except KeyboardInterrupt:
-            print("Stopping...")
             break
         except Exception as e:
-            print(f"Error: {e}")
+            print("err :", e)
             time.sleep(3)
 
 if __name__ == "__main__":
     main()
+
