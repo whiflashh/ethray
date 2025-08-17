@@ -12,4 +12,3 @@
    ```bash
    python3 tx_replay.py
    ```
-4. 테스트 완료 후 다시 테스트 필요 시 anvil 종료 후 위 과정 반복
