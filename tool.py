@@ -78,6 +78,8 @@ def main():
         try:
             current_block = w3.eth.block_number
             safe_block = current_block - 5
+
+            print(f"current block : {current_block}")
             
             if safe_block > last_block:
                 check_new_markets(last_block + 1, safe_block)
